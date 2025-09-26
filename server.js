@@ -1,276 +1,334 @@
+// server.js
 const express = require('express');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;  // Changed to port 8080
 
-// Middleware
+// Error handling for port already in use
+const server = app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`Port ${PORT} is busy. Trying port ${PORT + 1}`);
+    server.listen(PORT + 1);
+  } else {
+    console.error('Server error:', err);
+  }
+});
+
 app.use(cors());
 app.use(express.json());
 
-// In-memory storage for playing cards
-let cards = [
-  { id: 1, suit: 'Hearts', value: 'A' },
-  { id: 2, suit: 'Diamonds', value: 'K' },
-  { id: 3, suit: 'Clubs', value: 'Q' },
-  { id: 4, suit: 'Spades', value: 'J' },
-  { id: 5, suit: 'Hearts', value: '10' }
-];
+// In-memory data structure for seats
+const seats = Array.from({ length: 50 }, (_, index) => ({
+  id: index + 1,
+  status: 'available', // available, locked, booked
+  lockedBy: null,
+  lockedAt: null,
+  bookedBy: null
+}));
 
-let nextId = 6;
+// Lock expiration time (1 minute)
+const LOCK_EXPIRATION_TIME = 60 * 1000; // 1 minute in milliseconds
 
-// Helper function to validate card data
-const validateCard = (suit, value) => {
-  const validSuits = ['Hearts', 'Diamonds', 'Clubs', 'Spades'];
-  const validValues = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
-  
-  if (!validSuits.includes(suit)) {
-    return { isValid: false, message: 'Invalid suit. Must be Hearts, Diamonds, Clubs, or Spades' };
-  }
-  
-  if (!validValues.includes(value)) {
-    return { isValid: false, message: 'Invalid value. Must be A, 2-10, J, Q, or K' };
-  }
-  
-  return { isValid: true };
+// Middleware to clean expired locks
+const cleanExpiredLocks = (req, res, next) => {
+  const currentTime = Date.now();
+  seats.forEach(seat => {
+    if (seat.status === 'locked' && currentTime - seat.lockedAt > LOCK_EXPIRATION_TIME) {
+      seat.status = 'available';
+      seat.lockedBy = null;
+      seat.lockedAt = null;
+    }
+  });
+  next();
 };
 
-// Routes
+app.use(cleanExpiredLocks);
 
-// GET /api/cards - Get all cards
-app.get('/api/cards', (req, res) => {
+// GET /api/seats - Get all seats and their status
+app.get('/api/seats', (req, res) => {
   res.json({
     success: true,
-    count: cards.length,
-    data: cards
+    data: seats
   });
 });
 
-// GET /api/cards/:id - Get a specific card by ID
-app.get('/api/cards/:id', (req, res) => {
-  const cardId = parseInt(req.params.id);
-  
-  if (isNaN(cardId)) {
+// POST /api/seats/:id/lock - Lock a seat
+app.post('/api/seats/:id/lock', (req, res) => {
+  const seatId = parseInt(req.params.id);
+  const userId = req.body.userId; // Should be provided in request body
+
+  if (!userId) {
     return res.status(400).json({
       success: false,
-      message: 'Invalid card ID. Must be a number.'
+      message: 'User ID is required'
     });
   }
-  
-  const card = cards.find(c => c.id === cardId);
-  
-  if (!card) {
+
+  const seat = seats.find(s => s.id === seatId);
+
+  if (!seat) {
     return res.status(404).json({
       success: false,
-      message: 'Card not found'
+      message: 'Seat not found'
     });
   }
-  
+
+  if (seat.status !== 'available') {
+    return res.status(400).json({
+      success: false,
+      message: `Seat is ${seat.status}. Cannot lock at this time.`
+    });
+  }
+
+  seat.status = 'locked';
+  seat.lockedBy = userId;
+  seat.lockedAt = Date.now();
+
   res.json({
     success: true,
-    data: card
+    message: 'Seat locked successfully',
+    data: seat
   });
 });
 
-// POST /api/cards - Add a new card
-app.post('/api/cards', (req, res) => {
-  const { suit, value } = req.body;
-  
-  // Validate required fields
-  if (!suit || !value) {
-    return res.status(400).json({
-      success: false,
-      message: 'Both suit and value are required'
-    });
-  }
-  
-  // Validate card data
-  const validation = validateCard(suit, value);
-  if (!validation.isValid) {
-    return res.status(400).json({
-      success: false,
-      message: validation.message
-    });
-  }
-  
-  // Check if card already exists
-  const existingCard = cards.find(c => c.suit === suit && c.value === value);
-  if (existingCard) {
-    return res.status(409).json({
-      success: false,
-      message: 'Card with this suit and value already exists'
-    });
-  }
-  
-  // Create new card
-  const newCard = {
-    id: nextId++,
-    suit: suit,
-    value: value
-  };
-  
-  cards.push(newCard);
-  
-  res.status(201).json({
-    success: true,
-    message: 'Card created successfully',
-    data: newCard
-  });
-});
+// POST /api/seats/:id/confirm - Confirm booking for a locked seat
+app.post('/api/seats/:id/confirm', (req, res) => {
+  const seatId = parseInt(req.params.id);
+  const userId = req.body.userId;
 
-// PUT /api/cards/:id - Update a specific card
-app.put('/api/cards/:id', (req, res) => {
-  const cardId = parseInt(req.params.id);
-  const { suit, value } = req.body;
-  
-  if (isNaN(cardId)) {
+  if (!userId) {
     return res.status(400).json({
       success: false,
-      message: 'Invalid card ID. Must be a number.'
+      message: 'User ID is required'
     });
   }
-  
-  const cardIndex = cards.findIndex(c => c.id === cardId);
-  
-  if (cardIndex === -1) {
+
+  const seat = seats.find(s => s.id === seatId);
+
+  if (!seat) {
     return res.status(404).json({
       success: false,
-      message: 'Card not found'
+      message: 'Seat not found'
     });
   }
-  
-  // Validate required fields
-  if (!suit || !value) {
+
+  if (seat.status !== 'locked') {
     return res.status(400).json({
       success: false,
-      message: 'Both suit and value are required'
+      message: 'Seat must be locked before confirming'
     });
   }
-  
-  // Validate card data
-  const validation = validateCard(suit, value);
-  if (!validation.isValid) {
+
+  if (seat.lockedBy !== userId) {
+    return res.status(403).json({
+      success: false,
+      message: 'Seat is locked by another user'
+    });
+  }
+
+  // Check if lock has expired
+  if (Date.now() - seat.lockedAt > LOCK_EXPIRATION_TIME) {
+    seat.status = 'available';
+    seat.lockedBy = null;
+    seat.lockedAt = null;
     return res.status(400).json({
       success: false,
-      message: validation.message
+      message: 'Lock has expired. Please lock the seat again'
     });
   }
-  
-  // Check if another card with same suit and value exists
-  const existingCard = cards.find(c => c.suit === suit && c.value === value && c.id !== cardId);
-  if (existingCard) {
-    return res.status(409).json({
-      success: false,
-      message: 'Another card with this suit and value already exists'
-    });
-  }
-  
-  // Update card
-  cards[cardIndex] = {
-    ...cards[cardIndex],
-    suit: suit,
-    value: value
-  };
-  
+
+  seat.status = 'booked';
+  seat.bookedBy = userId;
+  seat.lockedBy = null;
+  seat.lockedAt = null;
+
   res.json({
     success: true,
-    message: 'Card updated successfully',
-    data: cards[cardIndex]
+    message: 'Booking confirmed successfully',
+    data: seat
   });
 });
 
-// DELETE /api/cards/:id - Delete a specific card
-app.delete('/api/cards/:id', (req, res) => {
-  const cardId = parseInt(req.params.id);
-  
-  if (isNaN(cardId)) {
+// POST /api/seats/:id/release - Release a locked seat
+app.post('/api/seats/:id/release', (req, res) => {
+  const seatId = parseInt(req.params.id);
+  const userId = req.body.userId;
+
+  if (!userId) {
     return res.status(400).json({
       success: false,
-      message: 'Invalid card ID. Must be a number.'
+      message: 'User ID is required'
     });
   }
-  
-  const cardIndex = cards.findIndex(c => c.id === cardId);
-  
-  if (cardIndex === -1) {
+
+  const seat = seats.find(s => s.id === seatId);
+
+  if (!seat) {
     return res.status(404).json({
       success: false,
-      message: 'Card not found'
+      message: 'Seat not found'
     });
   }
-  
-  const deletedCard = cards[cardIndex];
-  cards.splice(cardIndex, 1);
-  
-  res.json({
-    success: true,
-    message: 'Card deleted successfully',
-    data: deletedCard
-  });
-});
 
-// GET /api/cards/suit/:suit - Get all cards by suit
-app.get('/api/cards/suit/:suit', (req, res) => {
-  const suit = req.params.suit;
-  const validSuits = ['Hearts', 'Diamonds', 'Clubs', 'Spades'];
-  
-  if (!validSuits.includes(suit)) {
+  if (seat.status !== 'locked') {
     return res.status(400).json({
       success: false,
-      message: 'Invalid suit. Must be Hearts, Diamonds, Clubs, or Spades'
+      message: 'Seat is not locked'
     });
   }
-  
-  const suitCards = cards.filter(c => c.suit === suit);
-  
-  res.json({
-    success: true,
-    count: suitCards.length,
-    suit: suit,
-    data: suitCards
-  });
-});
 
-// GET /api/cards/value/:value - Get all cards by value
-app.get('/api/cards/value/:value', (req, res) => {
-  const value = req.params.value;
-  const validValues = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
-  
-  if (!validValues.includes(value)) {
-    return res.status(400).json({
+  if (seat.lockedBy !== userId) {
+    return res.status(403).json({
       success: false,
-      message: 'Invalid value. Must be A, 2-10, J, Q, or K'
+      message: 'Seat is locked by another user'
     });
   }
-  
-  const valueCards = cards.filter(c => c.value === value);
-  
+
+  seat.status = 'available';
+  seat.lockedBy = null;
+  seat.lockedAt = null;
+
   res.json({
     success: true,
-    count: valueCards.length,
-    value: value,
-    data: valueCards
+    message: 'Seat released successfully',
+    data: seat
   });
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-    success: false,
-    message: 'Something went wrong!'
+// GET /api/seats/available - Get all available seats
+app.get('/api/seats/available', (req, res) => {
+  const availableSeats = seats.filter(seat => seat.status === 'available');
+  res.json({
+    success: true,
+    count: availableSeats.length,
+    data: availableSeats
   });
 });
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found'
-  });
-});
-
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
+
+app.use(cors());
+app.use(express.json());
+
+// Helper: clear lock timer safely
+function clearSeatTimer(seat) {
+  if (seat && seat.timeoutId) {
+    clearTimeout(seat.timeoutId);
+    seat.timeoutId = undefined;
+  }
+}
+
+// Helper: set auto-expiry for a locked seat
+function armSeatExpiry(seatId) {
+  const seat = seats[seatId];
+  clearSeatTimer(seat);
+  seat.timeoutId = setTimeout(() => {
+    // If still locked and past expiry, release it
+    const now = Date.now();
+    if (seats[seatId].status === 'locked' && seats[seatId].lockExpiresAt && seats[seatId].lockExpiresAt <= now) {
+      seats[seatId] = { status: 'available' };
+    }
+  }, LOCK_TTL + 50); // slight buffer to ensure time check
+}
+
+// GET /seats -> map of seatId -> status
+app.get('/seats', (_req, res) => {
+  // Return minimal public view
+  const view = {};
+  Object.entries(seats).forEach(([id, seat]) => {
+    view[id] = { status: seat.status };
+  });
+  res.status(200).json(view);
+});
+
+// POST /lock/:id?user=U123 -> lock seat for user for 1 minute
+app.post('/lock/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const user = String(req.query.user || 'anonymous');
+
+  if (!seats[id]) {
+    return res.status(404).json({ message: `Seat ${id} does not exist.` });
+  }
+
+  const seat = seats[id];
+  const now = Date.now();
+
+  // If locked but expired, release first
+  if (seat.status === 'locked' && seat.lockExpiresAt && seat.lockExpiresAt <= now) {
+    clearSeatTimer(seat);
+    seats[id] = { status: 'available' };
+  }
+
+  if (seats[id].status === 'booked') {
+    return res.status(409).json({ message: `Seat ${id} is already booked.` });
+  }
+
+  if (seats[id].status === 'locked') {
+    return res.status(423).json({ message: `Seat ${id} is already locked. Try another seat.` });
+  }
+
+  // Acquire lock
+  const lockExpiresAt = now + LOCK_TTL;
+  seats[id] = { status: 'locked', lockedBy: user, lockExpiresAt };
+  armSeatExpiry(id);
+
+  return res.status(200).json({ message: `Seat ${id} locked successfully. Confirm within 1 minute.` });
+});
+
+// POST /confirm/:id?user=U123 -> confirm booking if locked by same user and not expired
+app.post('/confirm/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const user = String(req.query.user || 'anonymous');
+
+  if (!seats[id]) {
+    return res.status(404).json({ message: `Seat ${id} does not exist.` });
+  }
+
+  const seat = seats[id];
+  const now = Date.now();
+
+  if (seat.status !== 'locked') {
+    return res.status(400).json({ message: 'Seat is not locked and cannot be booked' });
+  }
+
+  if (seat.lockExpiresAt && seat.lockExpiresAt <= now) {
+    clearSeatTimer(seat);
+    seats[id] = { status: 'available' };
+    return res.status(408).json({ message: 'Lock expired. Please lock the seat again.' });
+  }
+
+  if (seat.lockedBy !== user) {
+    return res.status(403).json({ message: 'Seat locked by another user.' });
+  }
+
+  // Confirm booking
+  clearSeatTimer(seat);
+  seats[id] = { status: 'booked' };
+  return res.status(200).json({ message: `Seat ${id} booked successfully!` });
+});
+
+// Optional: unlock an active lock (admin/debug)
+// POST /unlock/:id
+app.post('/unlock/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!seats[id]) {
+    return res.status(404).json({ message: `Seat ${id} does not exist.` });
+  }
+  const seat = seats[id];
+  if (seat.status === 'available') {
+    return res.status(200).json({ message: `Seat ${id} already available.` });
+  }
+  if (seat.status === 'booked') {
+    return res.status(409).json({ message: `Seat ${id} is booked; cannot unlock.` });
+  }
+  clearSeatTimer(seat);
+  seats[id] = { status: 'available' };
+  return res.status(200).json({ message: `Seat ${id} lock cleared.` });
+});
+
+// Server is already started at the top of the file
